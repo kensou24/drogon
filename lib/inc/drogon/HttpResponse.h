@@ -1,6 +1,6 @@
 /**
  *  @file HttpResponse.h
- *  An Tao
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <drogon/utils/string_view.h>
 #include <drogon/DrClassMap.h>
 #include <drogon/Cookie.h>
@@ -63,7 +64,7 @@ inline HttpResponsePtr toResponse<Json::Value &>(Json::Value &pJson)
     return toResponse((const Json::Value &)pJson);
 }
 
-class HttpResponse
+class DROGON_EXPORT HttpResponse
 {
   public:
     /**
@@ -103,6 +104,11 @@ class HttpResponse
 
     /// Set the status code of the response.
     virtual void setStatusCode(HttpStatusCode code) = 0;
+
+    void setCustomStatusCode(int code, string_view message = string_view{})
+    {
+        setCustomStatusCode(code, message.data(), message.length());
+    }
 
     /// Get the creation timestamp of the response.
     virtual const trantor::Date &creationDate() const = 0;
@@ -353,6 +359,22 @@ class HttpResponse
         const std::string &attachmentFileName = "",
         ContentType type = CT_NONE);
 
+    /// Create a response that returns a file to the client from buffer in
+    /// memory/stack
+    /**
+     * @param pBuffer is a uint 8 bit flat buffer for object/files in memory
+     * @param bufferLength is the length of the expected buffer
+     * @param attachmentFileName if the parameter is not empty, the browser
+     * does not open the file, but saves it as an attachment.
+     * @param type if the parameter is CT_NONE, the content type is set by
+     * drogon based on the file extension.
+     */
+    static HttpResponsePtr newFileResponse(
+        const unsigned char *pBuffer,
+        size_t bufferLength,
+        const std::string &attachmentFileName = "",
+        ContentType type = CT_NONE);
+
     /**
      * @brief Create a custom HTTP response object. For using this template,
      * users must specialize the toResponse template.
@@ -374,6 +396,9 @@ class HttpResponse
     virtual void setContentTypeCodeAndCustomString(ContentType type,
                                                    const char *typeString,
                                                    size_t typeStringLength) = 0;
+    virtual void setCustomStatusCode(int code,
+                                     const char *message,
+                                     size_t messageLength) = 0;
 };
 template <>
 inline HttpResponsePtr toResponse<const Json::Value &>(const Json::Value &pJson)

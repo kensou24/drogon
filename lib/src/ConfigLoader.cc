@@ -231,6 +231,10 @@ static void loadApp(const Json::Value &app)
         return;
     // threads number
     auto threadsNum = app.get("threads_num", 1).asUInt64();
+    if (threadsNum == 1)
+    {
+        threadsNum = app.get("number_of_threads", 1).asUInt64();
+    }
     if (threadsNum == 0)
     {
         // set the number to the number of processors.
@@ -497,6 +501,10 @@ static void loadDbClients(const Json::Value &dbClients)
             password = client.get("password", "").asString();
         }
         auto connNum = client.get("connection_number", 1).asUInt();
+        if (connNum == 1)
+        {
+            connNum = client.get("number_of_connections", 1).asUInt();
+        }
         auto name = client.get("name", "default").asString();
         auto filename = client.get("filename", "").asString();
         auto isFast = client.get("is_fast", false).asBool();
@@ -505,6 +513,7 @@ static void loadDbClients(const Json::Value &dbClients)
         {
             characterSet = client.get("client_encoding", "").asString();
         }
+        auto timeout = client.get("timeout", -1.0).asDouble();
         drogon::app().createDbClient(type,
                                      host,
                                      (unsigned short)port,
@@ -515,9 +524,38 @@ static void loadDbClients(const Json::Value &dbClients)
                                      filename,
                                      name,
                                      isFast,
-                                     characterSet);
+                                     characterSet,
+                                     timeout);
     }
 }
+
+static void loadRedisClients(const Json::Value &redisClients)
+{
+    if (!redisClients)
+        return;
+    for (auto const &client : redisClients)
+    {
+        auto host = client.get("host", "127.0.0.1").asString();
+        auto port = client.get("port", 6379).asUInt();
+        auto password = client.get("passwd", "").asString();
+        if (password.empty())
+        {
+            password = client.get("password", "").asString();
+        }
+        auto connNum = client.get("connection_number", 1).asUInt();
+        if (connNum == 1)
+        {
+            connNum = client.get("number_of_connections", 1).asUInt();
+        }
+        auto name = client.get("name", "default").asString();
+        auto isFast = client.get("is_fast", false).asBool();
+        auto timeout = client.get("timeout", -1.0).asDouble();
+        auto db = client.get("db", 0).asUInt();
+        drogon::app().createRedisClient(
+            host, port, name, password, connNum, isFast, timeout, db);
+    }
+}
+
 static void loadListeners(const Json::Value &listeners)
 {
     if (!listeners)
@@ -531,17 +569,49 @@ static void loadListeners(const Json::Value &listeners)
         auto cert = listener.get("cert", "").asString();
         auto key = listener.get("key", "").asString();
         auto useOldTLS = listener.get("use_old_tls", false).asBool();
+        std::vector<std::pair<std::string, std::string>> sslConfCmds;
+        if (listener.isMember("ssl_conf"))
+        {
+            for (const auto &opt : listener["ssl_conf"])
+            {
+                if (opt.size() == 0 || opt.size() > 2)
+                {
+                    LOG_FATAL << "SSL configuration option should be an 1 or "
+                                 "2-element array";
+                    abort();
+                }
+                sslConfCmds.emplace_back(opt[0].asString(),
+                                         opt.get(1, "").asString());
+            }
+        }
         LOG_TRACE << "Add listener:" << addr << ":" << port;
-        drogon::app().addListener(addr, port, useSSL, cert, key, useOldTLS);
+        drogon::app().addListener(
+            addr, port, useSSL, cert, key, useOldTLS, sslConfCmds);
     }
 }
-static void loadSSL(const Json::Value &sslFiles)
+static void loadSSL(const Json::Value &sslConf)
 {
-    if (!sslFiles)
+    if (!sslConf)
         return;
-    auto key = sslFiles.get("key", "").asString();
-    auto cert = sslFiles.get("cert", "").asString();
+    auto key = sslConf.get("key", "").asString();
+    auto cert = sslConf.get("cert", "").asString();
     drogon::app().setSSLFiles(cert, key);
+    std::vector<std::pair<std::string, std::string>> sslConfCmds;
+    if (sslConf.isMember("conf"))
+    {
+        for (const auto &opt : sslConf["conf"])
+        {
+            if (opt.size() == 0 || opt.size() > 2)
+            {
+                LOG_FATAL << "SSL configuration option should be an 1 or "
+                             "2-element array";
+                abort();
+            }
+            sslConfCmds.emplace_back(opt[0].asString(),
+                                     opt.get(1, "").asString());
+        }
+    }
+    drogon::app().setSSLConfigCommands(sslConfCmds);
 }
 void ConfigLoader::load()
 {
@@ -550,4 +620,5 @@ void ConfigLoader::load()
     loadSSL(configJsonRoot_["ssl"]);
     loadListeners(configJsonRoot_["listeners"]);
     loadDbClients(configJsonRoot_["db_clients"]);
+    loadRedisClients(configJsonRoot_["redis_clients"]);
 }

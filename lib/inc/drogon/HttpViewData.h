@@ -1,7 +1,7 @@
 /**
  *
- *  HttpViewData.h
- *  An Tao
+ *  @file HttpViewData.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <drogon/utils/string_view.h>
 #include <drogon/utils/any.h>
 #include <trantor/utils/Logger.h>
@@ -23,11 +24,12 @@
 #include <unordered_map>
 #include <stdarg.h>
 #include <stdio.h>
+#include <type_traits>
 
 namespace drogon
 {
 /// This class represents the data set displayed in views.
-class HttpViewData
+class DROGON_EXPORT HttpViewData
 {
   public:
     /// The function template is used to get an item in the data set by the key
@@ -140,31 +142,11 @@ class HttpViewData
        @endcode
      */
     static std::string htmlTranslate(const char *str, size_t length);
-    static std::string htmlTranslate(const std::string &str)
-    {
-        return htmlTranslate(str.data(), str.length());
-    }
     static std::string htmlTranslate(const string_view &str)
     {
         return htmlTranslate(str.data(), str.length());
     }
-    static bool needTranslation(const std::string &str)
-    {
-        for (auto const &c : str)
-        {
-            switch (c)
-            {
-                case '"':
-                case '&':
-                case '<':
-                case '>':
-                    return true;
-                default:
-                    continue;
-            }
-        }
-        return false;
-    }
+
     static bool needTranslation(const string_view &str)
     {
         for (auto const &c : str)

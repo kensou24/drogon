@@ -15,10 +15,12 @@
 #pragma once
 
 #include <trantor/utils/NonCopyable.h>
-#include <string>
-#include <unordered_map>
 #include <functional>
+#include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <memory>
+#include <unordered_map>
 
 namespace drogon
 {

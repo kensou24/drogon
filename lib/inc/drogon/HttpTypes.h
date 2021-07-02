@@ -1,6 +1,6 @@
 /**
- *  HttpTypes.h
- *  An Tao
+ *  @file HttpTypes.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -19,10 +19,11 @@ namespace drogon
 {
 enum HttpStatusCode
 {
-    // rfc2616-6.1.1
     kUnknown = 0,
     k100Continue = 100,
     k101SwitchingProtocols = 101,
+    k102Processing = 102,
+    k103EarlyHints = 103,
     k200OK = 200,
     k201Created = 201,
     k202Accepted = 202,
@@ -30,12 +31,16 @@ enum HttpStatusCode
     k204NoContent = 204,
     k205ResetContent = 205,
     k206PartialContent = 206,
+    k207MultiStatus = 207,
+    k208AlreadyReported = 208,
+    k226IMUsed = 226,
     k300MultipleChoices = 300,
     k301MovedPermanently = 301,
     k302Found = 302,
     k303SeeOther = 303,
     k304NotModified = 304,
     k305UseProxy = 305,
+    k306Unused = 306,
     k307TemporaryRedirect = 307,
     k308PermanentRedirect = 308,
     k400BadRequest = 400,
@@ -58,6 +63,9 @@ enum HttpStatusCode
     k417ExpectationFailed = 417,
     k418ImATeapot = 418,
     k421MisdirectedRequest = 421,
+    k422UnprocessableEntity = 422,
+    k423Locked = 423,
+    k424FailedDependency = 424,
     k425TooEarly = 425,
     k426UpgradeRequired = 426,
     k428PreconditionRequired = 428,
@@ -70,7 +78,11 @@ enum HttpStatusCode
     k503ServiceUnavailable = 503,
     k504GatewayTimeout = 504,
     k505HTTPVersionNotSupported = 505,
+    k506VariantAlsoNegotiates = 506,
+    k507InsufficientStorage = 507,
+    k508LoopDetected = 508,
     k510NotExtended = 510,
+    k511NetworkAuthenticationRequired = 511
 };
 
 enum class Version
@@ -113,6 +125,17 @@ enum ContentType
     CT_CUSTOM
 };
 
+enum FileType
+{
+    FT_UNKNOWN = 0,
+    FT_CUSTOM,
+    FT_DOCUMENT,
+    FT_ARCHIVE,
+    FT_AUDIO,
+    FT_MEDIA,
+    FT_IMAGE
+};
+
 enum HttpMethod
 {
     Get = 0,
@@ -127,7 +150,7 @@ enum HttpMethod
 
 enum class ReqResult
 {
-    Ok,
+    Ok = 0,
     BadResponse,
     NetworkFailure,
     BadServerAddress,
@@ -138,7 +161,7 @@ enum class ReqResult
 
 enum class WebSocketMessageType
 {
-    Text,
+    Text = 0,
     Binary,
     Ping,
     Pong,

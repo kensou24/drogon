@@ -1,7 +1,7 @@
 /**
  *
- *  string_view.h
- *  An Tao
+ *  @file string_view.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -39,7 +39,7 @@ inline LogStream &operator<<(LogStream &ls, const drogon::string_view &v)
 }
 }  // namespace trantor
 
-#if __cplusplus < 201703L
+#if __cplusplus < 201703L && !(defined _MSC_VER && _MSC_VER > 1900)
 namespace std
 {
 template <>

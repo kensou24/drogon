@@ -1,7 +1,7 @@
 /**
  *
- *  coroutine.h
- *  Martin Chang
+ *  @file coroutine.h
+ *  @author Martin Chang
  *
  *  Copyright 2021, Martin Chang.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -15,14 +15,16 @@
 
 #include <drogon/utils/optional.h>
 #include <trantor/net/EventLoop.h>
+#include <trantor/utils/Logger.h>
 #include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <condition_variable>
 #include <coroutine>
 #include <exception>
-#include <type_traits>
-#include <condition_variable>
-#include <atomic>
 #include <future>
-#include <cassert>
+#include <mutex>
+#include <type_traits>
 
 namespace drogon
 {
@@ -106,7 +108,7 @@ struct [[nodiscard]] Task
     {
     }
     Task(const Task &) = delete;
-    Task(Task && other)
+    Task(Task &&other)
     {
         coro_ = other.coro_;
         other.coro_ = nullptr;
@@ -119,6 +121,11 @@ struct [[nodiscard]] Task
     Task &operator=(const Task &) = delete;
     Task &operator=(Task &&other)
     {
+        if (std::addressof(other) == this)
+            return *this;
+        if (coro_)
+            coro_.destroy();
+
         coro_ = other.coro_;
         other.coro_ = nullptr;
         return *this;
@@ -137,6 +144,10 @@ struct [[nodiscard]] Task
         void return_value(const T &v)
         {
             value = v;
+        }
+        void return_value(T &&v)
+        {
+            value = std::move(v);
         }
 
         auto final_suspend() noexcept
@@ -204,7 +215,7 @@ struct [[nodiscard]] Task
             T await_resume()
             {
                 auto &&v = coro_.promise().result();
-                return v;
+                return std::move(v);
             }
 
           private:
@@ -253,7 +264,7 @@ struct [[nodiscard]] Task<void>
     {
     }
     Task(const Task &) = delete;
-    Task(Task && other)
+    Task(Task &&other)
     {
         coro_ = other.coro_;
         other.coro_ = nullptr;
@@ -266,6 +277,11 @@ struct [[nodiscard]] Task<void>
     Task &operator=(const Task &) = delete;
     Task &operator=(Task &&other)
     {
+        if (std::addressof(other) == this)
+            return *this;
+        if (coro_)
+            coro_.destroy();
+
         coro_ = other.coro_;
         other.coro_ = nullptr;
         return *this;
@@ -375,47 +391,103 @@ struct [[nodiscard]] Task<void>
 /// destructs
 // NOTE: AsyncTask is designed to be not awaitable. And kills the entire process
 // if exception escaped.
-struct AsyncTask final
+struct AsyncTask
 {
-    struct promise_type final
+    struct promise_type;
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    AsyncTask() = default;
+
+    AsyncTask(handle_type h) : coro_(h)
     {
-        auto initial_suspend() noexcept
+    }
+
+    AsyncTask(const AsyncTask &) = delete;
+
+    AsyncTask &operator=(const AsyncTask &) = delete;
+    AsyncTask &operator=(AsyncTask &&other)
+    {
+        if (std::addressof(other) == this)
+            return *this;
+
+        coro_ = other.coro_;
+        other.coro_ = nullptr;
+        return *this;
+    }
+
+    struct promise_type
+    {
+        std::coroutine_handle<> continuation_;
+
+        AsyncTask get_return_object() noexcept
         {
-            return std::suspend_never{};
+            return {std::coroutine_handle<promise_type>::from_promise(*this)};
         }
 
-        auto final_suspend() noexcept
+        std::suspend_never initial_suspend() const noexcept
         {
-            return std::suspend_never{};
+            return {};
+        }
+
+        void unhandled_exception()
+        {
+            LOG_FATAL << "Exception escaping AsyncTask.";
+            std::terminate();
         }
 
         void return_void() noexcept
         {
         }
 
-        void unhandled_exception()
+        void setContinuation(std::coroutine_handle<> handle)
         {
-            std::terminate();
+            continuation_ = handle;
         }
 
-        promise_type *get_return_object() noexcept
+        auto final_suspend() const noexcept
         {
-            return this;
-        }
+            // Can't simply use suspend_never because we need symmetric transfer
+            struct awaiter final
+            {
+                bool await_ready() const noexcept
+                {
+                    return true;
+                }
 
-        void result()
-        {
+                auto await_suspend(
+                    std::coroutine_handle<promise_type> coro) const noexcept
+                {
+                    return coro.promise().continuation_;
+                }
+
+                void await_resume() const noexcept
+                {
+                }
+            };
+            return awaiter{};
         }
     };
-    AsyncTask(const promise_type *) noexcept
+    bool await_ready() const noexcept
     {
-        // the type truncates all given info about its frame
+        return coro_.done();
     }
+
+    void await_resume() const noexcept
+    {
+    }
+
+    auto await_suspend(std::coroutine_handle<> coroutine) noexcept
+    {
+        coro_.promise().setContinuation(coroutine);
+        return coro_;
+    }
+
+    handle_type coro_;
 };
 
-/// Helper class that provices the infrastructure for turning callback into
-/// corourines
-// The user is responsible to fill in `await_suspend()` and construtors.
+/// Helper class that provides the infrastructure for turning callback into
+/// coroutines
+// The user is responsible to fill in `await_suspend()` and constructors.
 template <typename T = void>
 struct CallbackAwaiter
 {
@@ -427,7 +499,7 @@ struct CallbackAwaiter
     const T &await_resume() const noexcept(false)
     {
         // await_resume() should always be called after co_await
-        // (await_suspend()) is called. Therefor the value should always be set
+        // (await_suspend()) is called. Therefore the value should always be set
         // (or there's an exception)
         assert(result_.has_value() == true || exception_ != nullptr);
 
@@ -437,7 +509,7 @@ struct CallbackAwaiter
     }
 
   private:
-    // HACK: Not all desired types are default contructable. But we need the
+    // HACK: Not all desired types are default constructable. But we need the
     // entire struct to be constructed for awaiting. std::optional takes care of
     // that.
     optional<T> result_;
@@ -484,21 +556,20 @@ struct CallbackAwaiter<void>
 
 // An ok implementation of sync_await. This allows one to call
 // coroutines and wait for the result from a function.
-//
-// NOTE: Not sure if this is a compiler bug. But causes use after free in some
-// cases. Don't use it in production code.
-template <typename AWAIT>
-auto sync_wait(AWAIT &&await)
+template <typename Await>
+auto sync_wait(Await &&await)
 {
-    using value_type = typename await_result<AWAIT>::type;
+    static_assert(is_awaitable_v<std::decay_t<Await>>);
+    using value_type = typename await_result<Await>::type;
     std::condition_variable cv;
     std::mutex mtx;
     std::atomic<bool> flag = false;
     std::exception_ptr exception_ptr;
+    std::unique_lock lk(mtx);
 
     if constexpr (std::is_same_v<value_type, void>)
     {
-        [&, lk = std::unique_lock(mtx)]() -> AsyncTask {
+        auto task = [&]() -> AsyncTask {
             try
             {
                 co_await await;
@@ -507,52 +578,55 @@ auto sync_wait(AWAIT &&await)
             {
                 exception_ptr = std::current_exception();
             }
-
+            std::unique_lock lk(mtx);
             flag = true;
-            cv.notify_one();
-        }();
+            cv.notify_all();
+        };
 
-        std::unique_lock lk(mtx);
+        std::thread thr([&]() { task(); });
         cv.wait(lk, [&]() { return (bool)flag; });
+        thr.join();
         if (exception_ptr)
             std::rethrow_exception(exception_ptr);
     }
     else
     {
         optional<value_type> value;
-        [&, lk = std::unique_lock(mtx)]() -> AsyncTask {
+        auto task = [&]() -> AsyncTask {
             try
             {
                 value = co_await await;
             }
-            catch (const std::exception &e)
+            catch (...)
             {
                 exception_ptr = std::current_exception();
             }
+            std::unique_lock lk(mtx);
             flag = true;
-        }();
+            cv.notify_all();
+        };
 
-        std::unique_lock lk(mtx);
+        std::thread thr([&]() { task(); });
         cv.wait(lk, [&]() { return (bool)flag; });
-
         assert(value.has_value() == true || exception_ptr);
+        thr.join();
+
         if (exception_ptr)
             std::rethrow_exception(exception_ptr);
-        return value.value();
+
+        return std::move(value.value());
     }
 }
 
 // Converts a task (or task like) promise into std::future for old-style async
-// NOTE: Not sure if this is a compiler bug. But causes use after free in some
-// cases. Don't use it in production code.
 template <typename Await>
-inline auto co_future(Await await) noexcept
+inline auto co_future(Await &&await) noexcept
     -> std::future<await_result_t<Await>>
 {
     using Result = await_result_t<Await>;
     std::promise<Result> prom;
     auto fut = prom.get_future();
-    [](std::promise<Result> &&prom, Await &&await) -> AsyncTask {
+    [](std::promise<Result> prom, Await await) -> AsyncTask {
         try
         {
             if constexpr (std::is_void_v<Result>)
@@ -576,7 +650,7 @@ namespace internal
 struct TimerAwaiter : CallbackAwaiter<void>
 {
     TimerAwaiter(trantor::EventLoop *loop,
-                 const std::chrono::duration<long double> &delay)
+                 const std::chrono::duration<double> &delay)
         : loop_(loop), delay_(delay.count())
     {
     }
@@ -597,7 +671,7 @@ struct TimerAwaiter : CallbackAwaiter<void>
 
 inline internal::TimerAwaiter sleepCoro(
     trantor::EventLoop *loop,
-    const std::chrono::duration<long double> &delay) noexcept
+    const std::chrono::duration<double> &delay) noexcept
 {
     assert(loop);
     return internal::TimerAwaiter(loop, delay);
@@ -609,5 +683,26 @@ inline internal::TimerAwaiter sleepCoro(trantor::EventLoop *loop,
     assert(loop);
     return internal::TimerAwaiter(loop, delay);
 }
+
+template <typename T, typename = std::void_t<>>
+struct is_resumable : std::false_type
+{
+};
+
+template <typename T>
+struct is_resumable<
+    T,
+    std::void_t<decltype(internal::getAwaiter(std::declval<T>()))>>
+    : std::true_type
+{
+};
+
+template <>
+struct is_resumable<AsyncTask, std::void_t<AsyncTask>> : std::true_type
+{
+};
+
+template <typename T>
+constexpr bool is_resumable_v = is_resumable<T>::value;
 
 }  // namespace drogon

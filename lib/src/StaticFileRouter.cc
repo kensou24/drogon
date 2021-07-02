@@ -59,11 +59,28 @@ void StaticFileRouter::route(
     std::function<void(const HttpResponsePtr &)> &&callback)
 {
     const std::string &path = req->path();
-    if (path.find("/../") != std::string::npos)
+    if (path.find("..") != std::string::npos)
     {
-        // Downloading files from the parent folder is forbidden.
-        callback(app().getCustomErrorHandler()(k403Forbidden));
-        return;
+        auto directories = utils::splitString(path, "/");
+        int traversalDepth = 0;
+        for (const auto &dir : directories)
+        {
+            if (dir == "..")
+            {
+                traversalDepth--;
+            }
+            else if (dir != ".")
+            {
+                traversalDepth++;
+            }
+
+            if (traversalDepth < 0)
+            {
+                // Downloading files from the parent folder is forbidden.
+                callback(app().getCustomErrorHandler()(k403Forbidden));
+                return;
+            }
+        }
     }
 
     auto lPath = path;
@@ -123,7 +140,7 @@ void StaticFileRouter::route(
             struct stat fileStat;
             if (stat(filePath.c_str(), &fileStat) != 0)
             {
-                callback(HttpResponse::newNotFoundResponse());
+                defaultHandler_(req, std::move(callback));
                 return;
             }
             if (S_ISDIR(fileStat.st_mode))
@@ -167,7 +184,7 @@ void StaticFileRouter::route(
             {
                 sendStaticFileResponse(filePath,
                                        req,
-                                       callback,
+                                       std::move(callback),
                                        string_view{
                                            location.defaultContentType_});
             }
@@ -187,7 +204,7 @@ void StaticFileRouter::route(
                      &contentType = location.defaultContentType_]() {
                         sendStaticFileResponse(filePath,
                                                req,
-                                               *callbackPtr,
+                                               std::move(*callbackPtr),
                                                string_view{contentType});
                     });
             }
@@ -207,7 +224,7 @@ void StaticFileRouter::route(
             if (implicitPageEnable_)
             {
                 std::string filePath = directoryPath + "/" + implicitPage_;
-                sendStaticFileResponse(filePath, req, callback, "");
+                sendStaticFileResponse(filePath, req, std::move(callback), "");
                 return;
             }
             else
@@ -230,18 +247,18 @@ void StaticFileRouter::route(
             {
                 // LOG_INFO << "file query!" << path;
                 std::string filePath = directoryPath;
-                sendStaticFileResponse(filePath, req, callback, "");
+                sendStaticFileResponse(filePath, req, std::move(callback), "");
                 return;
             }
         }
     }
-    callback(HttpResponse::newNotFoundResponse());
+    defaultHandler_(req, std::move(callback));
 }
 
 void StaticFileRouter::sendStaticFileResponse(
     const std::string &filePath,
     const HttpRequestImplPtr &req,
-    const std::function<void(const HttpResponsePtr &)> &callback,
+    std::function<void(const HttpResponsePtr &)> &&callback,
     const string_view &defaultContentType)
 {  // find cached response
     HttpResponsePtr cachedResp;
@@ -324,7 +341,7 @@ void StaticFileRouter::sendStaticFileResponse(
             }
             else
             {
-                callback(HttpResponse::newNotFoundResponse());
+                defaultHandler_(req, std::move(callback));
                 return;
             }
         }
@@ -348,7 +365,7 @@ void StaticFileRouter::sendStaticFileResponse(
         if (stat(filePath.c_str(), &fileStat) != 0 ||
             !S_ISREG(fileStat.st_mode))
         {
-            callback(HttpResponse::newNotFoundResponse());
+            defaultHandler_(req, std::move(callback));
             return;
         }
     }
@@ -443,4 +460,10 @@ void StaticFileRouter::setFileTypes(const std::vector<std::string> &types)
     {
         fileTypeSet_.insert(type);
     }
+}
+void StaticFileRouter::defaultHandler(
+    const HttpRequestPtr & /*req*/,
+    std::function<void(const HttpResponsePtr &)> &&callback)
+{
+    callback(HttpResponse::newNotFoundResponse());
 }

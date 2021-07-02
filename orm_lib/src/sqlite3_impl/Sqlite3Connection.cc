@@ -16,8 +16,10 @@
 #include "Sqlite3ResultImpl.h"
 #include <drogon/utils/Utilities.h>
 #include <drogon/utils/string_view.h>
-#include <regex>
 #include <cctype>
+#include <exception>
+#include <mutex>
+#include <regex>
 
 using namespace drogon;
 using namespace drogon::orm;
@@ -28,22 +30,20 @@ void Sqlite3Connection::onError(
     const string_view &sql,
     const std::function<void(const std::exception_ptr &)> &exceptCallback)
 {
-    try
-    {
-        throw SqlError(sqlite3_errmsg(connectionPtr_.get()), std::string{sql});
-    }
-    catch (...)
-    {
-        auto exceptPtr = std::current_exception();
-        exceptCallback(exceptPtr);
-    }
+    auto exceptPtr = std::make_exception_ptr(
+        SqlError(sqlite3_errmsg(connectionPtr_.get()), std::string{sql}));
+    exceptCallback(exceptPtr);
 }
 
 Sqlite3Connection::Sqlite3Connection(
     trantor::EventLoop *loop,
     const std::string &connInfo,
     const std::shared_ptr<SharedMutex> &sharedMutex)
-    : DbConnection(loop), sharedMutexPtr_(sharedMutex)
+    : DbConnection(loop), sharedMutexPtr_(sharedMutex), connInfo_(connInfo)
+{
+}
+
+void Sqlite3Connection::init()
 {
     loopThread_.run();
     loop_ = loopThread_.getLoop();
@@ -55,7 +55,7 @@ Sqlite3Connection::Sqlite3Connection(
         }
     });
     // Get the key and value
-    auto connParams = parseConnString(connInfo);
+    auto connParams = parseConnString(connInfo_);
     std::string filename;
     for (auto const &kv : connParams)
     {
@@ -153,17 +153,10 @@ void Sqlite3Connection::execSqlInQueue(
                 return std::isspace(ch);
             }))
         {
-            try
-            {
-                throw SqlError(
-                    "Multiple semicolon separated statements are unsupported",
-                    std::string{sql});
-            }
-            catch (...)
-            {
-                auto exceptPtr = std::current_exception();
-                exceptCallback(exceptPtr);
-            }
+            auto exceptPtr = std::make_exception_ptr(SqlError(
+                "Multiple semicolon separated statements are unsupported",
+                std::string{sql}));
+            exceptCallback(exceptPtr);
             idleCb_();
             return;
         }
@@ -172,7 +165,7 @@ void Sqlite3Connection::execSqlInQueue(
     auto stmt = stmtPtr.get();
     for (int i = 0; i < (int)parameters.size(); ++i)
     {
-        int bindRet;
+        int bindRet{SQLITE_OK};
         switch (format[i])
         {
             case Sqlite3TypeChar:
@@ -205,6 +198,9 @@ void Sqlite3Connection::execSqlInQueue(
             case Sqlite3TypeNull:
                 bindRet = sqlite3_bind_null(stmt, i + 1);
                 break;
+            default:
+                LOG_FATAL << "SQLite does not recognize the parameter type";
+                abort();
         }
         if (bindRet != SQLITE_OK)
         {
@@ -312,8 +308,14 @@ void Sqlite3Connection::disconnect()
     std::promise<int> pro;
     auto f = pro.get_future();
     auto thisPtr = shared_from_this();
-    loopThread_.getLoop()->runInLoop([thisPtr, &pro]() {
-        thisPtr->connectionPtr_.reset();
+    std::weak_ptr<Sqlite3Connection> weakPtr = thisPtr;
+    loopThread_.getLoop()->runInLoop([weakPtr, &pro]() {
+        {
+            auto thisPtr = weakPtr.lock();
+            if (!thisPtr)
+                return;
+            thisPtr->connectionPtr_.reset();
+        }
         pro.set_value(1);
     });
     f.get();

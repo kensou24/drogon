@@ -1,7 +1,7 @@
 /**
  *
  *  @file HttpRequest.h
- *  An Tao
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <drogon/utils/string_view.h>
 #include <drogon/DrClassMap.h>
 #include <drogon/HttpTypes.h>
@@ -37,7 +38,7 @@ using HttpRequestPtr = std::shared_ptr<HttpRequest>;
  * type object. Users must specialize the template for a particular type.
  */
 template <typename T>
-T fromRequest(const HttpRequest &req)
+T fromRequest(const HttpRequest &)
 {
     LOG_ERROR << "You must specialize the fromRequest template for the type of "
               << DrClassMap::demangle(typeid(T).name());
@@ -71,7 +72,7 @@ template <>
 std::shared_ptr<Json::Value> fromRequest(const HttpRequest &req);
 
 /// Abstract class for webapp developer to get or set the Http request;
-class HttpRequest
+class DROGON_EXPORT HttpRequest
 {
   public:
     /**
@@ -291,8 +292,7 @@ class HttpRequest
 
     /// Get the Json object of the request
     /**
-     * The content type of the request must be 'application/json', and the query
-     * string (the part after the question mark in the URI) must be empty,
+     * The content type of the request must be 'application/json',
      * otherwise the method returns an empty shared_ptr object.
      */
     virtual const std::shared_ptr<Json::Value> &jsonObject() const = 0;

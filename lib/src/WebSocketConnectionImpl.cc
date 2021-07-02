@@ -1,7 +1,7 @@
 /**
  *
- *  WebSocketConnectionImpl.cc
- *  An Tao
+ *  @file WebSocketConnectionImpl.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -23,10 +23,14 @@ WebSocketConnectionImpl::WebSocketConnectionImpl(
     : tcpConnectionPtr_(conn),
       localAddr_(conn->localAddr()),
       peerAddr_(conn->peerAddr()),
-      isServer_(isServer)
+      isServer_(isServer),
+      usingMask_(false)
 {
 }
-
+WebSocketConnectionImpl::~WebSocketConnectionImpl()
+{
+    shutdown();
+}
 void WebSocketConnectionImpl::send(const char *msg,
                                    uint64_t len,
                                    const WebSocketMessageType type)
@@ -102,16 +106,42 @@ void WebSocketConnectionImpl::sendWsData(const char *msg,
     }
     if (!isServer_)
     {
-        // Add masking key;
-        static std::once_flag once;
-        std::call_once(once, []() {
-            std::srand(static_cast<unsigned int>(time(nullptr)));
-        });
-        int random = std::rand();
+        int random;
+        // Use the cached randomness if no one else is also using it. Otherwise
+        // generate one from scratch.
+        if (!usingMask_.exchange(true))
+        {
+            if (masks_.empty())
+            {
+                masks_.resize(16);
+                bool status =
+                    utils::secureRandomBytes(masks_.data(),
+                                             masks_.size() * sizeof(uint32_t));
+                if (status == false)
+                {
+                    LOG_ERROR << "Failed to generate random numbers for "
+                                 "WebSocket mask";
+                    abort();
+                }
+            }
+            random = masks_.back();
+            masks_.pop_back();
+            usingMask_ = false;
+        }
+        else
+        {
+            bool status = utils::secureRandomBytes(&random, sizeof(random));
+            if (status == false)
+            {
+                LOG_ERROR
+                    << "Failed to generate random numbers for WebSocket mask";
+                abort();
+            }
+        }
 
         bytesFormatted[1] = (bytesFormatted[1] | 0x80);
         bytesFormatted.resize(indexStartRawData + 4 + len);
-        *((int *)&bytesFormatted[indexStartRawData]) = random;
+        memcpy(&bytesFormatted[indexStartRawData], &random, sizeof(random));
         for (size_t i = 0; i < len; ++i)
         {
             bytesFormatted[indexStartRawData + 4 + i] =
@@ -152,6 +182,8 @@ void WebSocketConnectionImpl::WebSocketConnectionImpl::shutdown(
     const std::string &reason)
 {
     tcpConnectionPtr_->getLoop()->invalidateTimer(pingTimerId_);
+    if (!tcpConnectionPtr_->connected())
+        return;
     std::string message;
     message.resize(reason.length() + 2);
     auto c = htons(static_cast<unsigned short>(code));
@@ -168,17 +200,34 @@ void WebSocketConnectionImpl::WebSocketConnectionImpl::forceClose()
 
 void WebSocketConnectionImpl::setPingMessage(
     const std::string &message,
-    const std::chrono::duration<long double> &interval)
+    const std::chrono::duration<double> &interval)
 {
-    std::weak_ptr<WebSocketConnectionImpl> weakPtr = shared_from_this();
-    pingTimerId_ = tcpConnectionPtr_->getLoop()->runEvery(
-        interval.count(), [weakPtr, message]() {
-            auto thisPtr = weakPtr.lock();
-            if (thisPtr)
-            {
-                thisPtr->send(message, WebSocketMessageType::Ping);
-            }
-        });
+    auto loop = tcpConnectionPtr_->getLoop();
+    if (loop->isInLoopThread())
+    {
+        setPingMessageInLoop(std::string{message}, interval);
+    }
+    else
+    {
+        loop->queueInLoop(
+            [msg = message, interval, thisPtr = shared_from_this()]() mutable {
+                thisPtr->setPingMessageInLoop(std::move(msg), interval);
+            });
+    }
+}
+
+void WebSocketConnectionImpl::disablePing()
+{
+    auto loop = tcpConnectionPtr_->getLoop();
+    if (loop->isInLoopThread())
+    {
+        disablePingInLoop();
+    }
+    else
+    {
+        loop->queueInLoop(
+            [thisPtr = shared_from_this()]() { thisPtr->disablePingInLoop(); });
+    }
 }
 
 bool WebSocketMessageParser::parse(trantor::MsgBuffer *buffer)
@@ -346,6 +395,8 @@ void WebSocketConnectionImpl::onNewMessage(
                 {
                     return;
                 }
+                // LOG_TRACE << "new message received: " << message
+                //           << "\n(type=" << (int)type << ")";
                 messageCallback_(std::move(message), shared_from_this(), type);
             }
             else
@@ -361,4 +412,28 @@ void WebSocketConnectionImpl::onNewMessage(
         }
     }
     return;
+}
+
+void WebSocketConnectionImpl::disablePingInLoop()
+{
+    if (pingTimerId_ != trantor::InvalidTimerId)
+    {
+        tcpConnectionPtr_->getLoop()->invalidateTimer(pingTimerId_);
+    }
+}
+
+void WebSocketConnectionImpl::setPingMessageInLoop(
+    std::string &&message,
+    const std::chrono::duration<double> &interval)
+{
+    std::weak_ptr<WebSocketConnectionImpl> weakPtr = shared_from_this();
+    disablePingInLoop();
+    pingTimerId_ = tcpConnectionPtr_->getLoop()->runEvery(
+        interval.count(), [weakPtr, message = std::move(message)]() {
+            auto thisPtr = weakPtr.lock();
+            if (thisPtr)
+            {
+                thisPtr->send(message, WebSocketMessageType::Ping);
+            }
+        });
 }

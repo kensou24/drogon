@@ -13,6 +13,8 @@
  */
 
 #pragma once
+
+#include <drogon/exports.h>
 #include <drogon/orm/Exception.h>
 #include <drogon/orm/Field.h>
 #include <drogon/orm/Result.h>
@@ -67,9 +69,10 @@ struct SqlAwaiter : public CallbackAwaiter<Result>
     internal::SqlBinder binder_;
 };
 
-struct TrasactionAwaiter : public CallbackAwaiter<std::shared_ptr<Transaction>>
+struct TransactionAwaiter
+    : public CallbackAwaiter<std::shared_ptr<Transaction> >
 {
-    TrasactionAwaiter(DbClient *client) : client_(client)
+    TransactionAwaiter(DbClient *client) : client_(client)
     {
     }
 
@@ -84,7 +87,7 @@ struct TrasactionAwaiter : public CallbackAwaiter<std::shared_ptr<Transaction>>
 }  // namespace internal
 
 /// Database client abstract class
-class DbClient : public trantor::NonCopyable
+class DROGON_EXPORT DbClient : public trantor::NonCopyable
 {
   public:
     virtual ~DbClient(){};
@@ -109,7 +112,7 @@ class DbClient : public trantor::NonCopyable
      * - client_encoding: The character set to be used on database connections.
      *
      * For other key words on PostgreSQL, see the PostgreSQL documentation.
-     * Only a pair of key values ​​is valid for Sqlite3, and its keyword is
+     * Only a pair of key values is valid for Sqlite3, and its keyword is
      * 'filename'.
      *
      * @param connNum: The number of connections to database server;
@@ -152,7 +155,7 @@ class DbClient : public trantor::NonCopyable
     void execSqlAsync(const std::string &sql,
                       FUNCTION1 &&rCallback,
                       FUNCTION2 &&exceptCallback,
-                      Arguments &&... args) noexcept
+                      Arguments &&...args) noexcept
     {
         auto binder = *this << sql;
         (void)std::initializer_list<int>{
@@ -164,13 +167,13 @@ class DbClient : public trantor::NonCopyable
     /// Async and nonblocking method
     template <typename... Arguments>
     std::future<Result> execSqlAsyncFuture(const std::string &sql,
-                                           Arguments &&... args) noexcept
+                                           Arguments &&...args) noexcept
     {
         auto binder = *this << sql;
         (void)std::initializer_list<int>{
             (binder << std::forward<Arguments>(args), 0)...};
-        std::shared_ptr<std::promise<Result>> prom =
-            std::make_shared<std::promise<Result>>();
+        std::shared_ptr<std::promise<Result> > prom =
+            std::make_shared<std::promise<Result> >();
         binder >> [prom](const Result &r) { prom->set_value(r); };
         binder >>
             [prom](const std::exception_ptr &e) { prom->set_exception(e); };
@@ -181,7 +184,7 @@ class DbClient : public trantor::NonCopyable
     // Sync and blocking method
     template <typename... Arguments>
     const Result execSqlSync(const std::string &sql,
-                             Arguments &&... args) noexcept(false)
+                             Arguments &&...args) noexcept(false)
     {
         Result r(nullptr);
         {
@@ -199,8 +202,8 @@ class DbClient : public trantor::NonCopyable
 
 #ifdef __cpp_impl_coroutine
     template <typename... Arguments>
-    internal::SqlAwaiter execSqlCoro(const std::string sql,
-                                     Arguments... args) noexcept
+    internal::SqlAwaiter execSqlCoro(const std::string &sql,
+                                     Arguments &&...args) noexcept
     {
         auto binder = *this << sql;
         (void)std::initializer_list<int>{
@@ -234,19 +237,25 @@ class DbClient : public trantor::NonCopyable
      * automatically or manually rolled back, the callback will never be
      * executed. You can also use the setCommitCallback() method of a
      * transaction object to set the callback.
+     * @note A TimeoutError exception is thrown if the operation is timed out.
      */
     virtual std::shared_ptr<Transaction> newTransaction(
-        const std::function<void(bool)> &commitCallback = nullptr) = 0;
+        const std::function<void(bool)> &commitCallback =
+            std::function<void(bool)>()) noexcept(false) = 0;
 
     /// Create a transaction object in asynchronous mode.
+    /**
+     * @note An empty shared_ptr object is returned via the callback if the
+     * operation is timed out.
+     */
     virtual void newTransactionAsync(
         const std::function<void(const std::shared_ptr<Transaction> &)>
             &callback) = 0;
 
 #ifdef __cpp_impl_coroutine
-    orm::internal::TrasactionAwaiter newTransactionCoro()
+    orm::internal::TransactionAwaiter newTransactionCoro()
     {
-        return orm::internal::TrasactionAwaiter(this);
+        return orm::internal::TransactionAwaiter(this);
     }
 #endif
 
@@ -266,6 +275,18 @@ class DbClient : public trantor::NonCopyable
     {
         return connectionInfo_;
     }
+
+    /**
+     * @brief Set the Timeout value of execution of a SQL.
+     *
+     * @param timeout in seconds, if the SQL result is not returned from the
+     * server within the timeout, a TimeoutError exception with "SQL execution
+     * timeout" string is generated and returned to the caller.
+     * @note set the timeout value to zero or negative for no limit on time. The
+     * default value is -1.0, this means there is no time limit if this method
+     * is not called.
+     */
+    virtual void setTimeout(double timeout) = 0;
 
   private:
     friend internal::SqlBinder;
@@ -295,15 +316,15 @@ class Transaction : public DbClient
 };
 
 #ifdef __cpp_impl_coroutine
-inline void internal::TrasactionAwaiter::await_suspend(
+inline void internal::TransactionAwaiter::await_suspend(
     std::coroutine_handle<> handle)
 {
     assert(client_ != nullptr);
     client_->newTransactionAsync(
         [this, handle](const std::shared_ptr<Transaction> &transaction) {
             if (transaction == nullptr)
-                setException(std::make_exception_ptr(
-                    Failure("Failed to create transaction")));
+                setException(std::make_exception_ptr(TimeoutError(
+                    "Timeout, no connection available for transaction")));
             else
                 setValue(transaction);
             handle.resume();

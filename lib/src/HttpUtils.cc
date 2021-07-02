@@ -186,6 +186,16 @@ const string_view &statusCodeToString(int code)
             static string_view sv = "Switching Protocols";
             return sv;
         }
+        case 102:
+        {
+            static string_view sv = "Processing";
+            return sv;
+        }
+        case 103:
+        {
+            static string_view sv = "Early Hints";
+            return sv;
+        }
         case 200:
         {
             static string_view sv = "OK";
@@ -221,6 +231,21 @@ const string_view &statusCodeToString(int code)
             static string_view sv = "Partial Content";
             return sv;
         }
+        case 207:
+        {
+            static string_view sv = "Multi-Status";
+            return sv;
+        }
+        case 208:
+        {
+            static string_view sv = "Already Reported";
+            return sv;
+        }
+        case 226:
+        {
+            static string_view sv = "IM Used";
+            return sv;
+        }
         case 300:
         {
             static string_view sv = "Multiple Choices";
@@ -249,6 +274,11 @@ const string_view &statusCodeToString(int code)
         case 305:
         {
             static string_view sv = "Use Proxy";
+            return sv;
+        }
+        case 306:
+        {
+            static string_view sv = "(Unused)";
             return sv;
         }
         case 307:
@@ -361,6 +391,21 @@ const string_view &statusCodeToString(int code)
             static string_view sv = "Misdirected Request";
             return sv;
         }
+        case 422:
+        {
+            static string_view sv = "Unprocessable Entity";
+            return sv;
+        }
+        case 423:
+        {
+            static string_view sv = "Locked";
+            return sv;
+        }
+        case 424:
+        {
+            static string_view sv = "Failed Dependency";
+            return sv;
+        }
         case 425:
         {
             static string_view sv = "Too Early";
@@ -421,9 +466,29 @@ const string_view &statusCodeToString(int code)
             static string_view sv = "HTTP Version Not Supported";
             return sv;
         }
+        case 506:
+        {
+            static string_view sv = "Variant Also Negotiates";
+            return sv;
+        }
+        case 507:
+        {
+            static string_view sv = "Insufficient Storage";
+            return sv;
+        }
+        case 508:
+        {
+            static string_view sv = "Loop Detected";
+            return sv;
+        }
         case 510:
         {
             static string_view sv = "Not Extended";
+            return sv;
+        }
+        case 511:
+        {
+            static string_view sv = "Network Authentication Required";
             return sv;
         }
         default:
@@ -603,4 +668,20 @@ ContentType parseContentType(const string_view &contentType)
     return iter->second;
 }
 
+FileType parseFileType(const string_view &fileExtension)
+{
+    // https://en.wikipedia.org/wiki/List_of_file_formats
+    static const std::unordered_map<string_view, FileType> map_{
+        {"", FT_UNKNOWN},    {"html", FT_DOCUMENT}, {"docx", FT_DOCUMENT},
+        {"zip", FT_ARCHIVE}, {"rar", FT_ARCHIVE},   {"xz", FT_ARCHIVE},
+        {"7z", FT_ARCHIVE},  {"tgz", FT_ARCHIVE},   {"gz", FT_ARCHIVE},
+        {"bz2", FT_ARCHIVE}, {"mp3", FT_AUDIO},     {"wav", FT_AUDIO},
+        {"avi", FT_MEDIA},   {"gif", FT_MEDIA},     {"mp4", FT_MEDIA},
+        {"mov", FT_MEDIA},   {"png", FT_IMAGE},     {"jpeg", FT_IMAGE},
+        {"jpg", FT_IMAGE},   {"ico", FT_IMAGE}};
+    auto iter = map_.find(fileExtension);
+    if (iter == map_.end())
+        return FT_CUSTOM;
+    return iter->second;
+}
 }  // namespace drogon

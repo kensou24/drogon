@@ -1,7 +1,7 @@
 /**
  *
- *  Utilities.cc
- *  An Tao
+ *  @file Utilities.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -17,6 +17,7 @@
 #include <drogon/config.h>
 #ifdef OpenSSL_FOUND
 #include <openssl/md5.h>
+#include <openssl/rand.h>
 #else
 #include "ssl_funcs/Md5.h"
 #endif
@@ -28,8 +29,10 @@
 #include <Rpc.h>
 #include <direct.h>
 #include <io.h>
+#include <ntsecapi.h>
 #else
 #include <uuid.h>
+#include <unistd.h>
 #endif
 #include <zlib.h>
 #include <iomanip>
@@ -44,9 +47,6 @@
 #include <cstdlib>
 #include <stdio.h>
 #include <string.h>
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -830,7 +830,20 @@ std::string urlDecode(const char *begin, const char *end)
 /* Compress gzip data */
 std::string gzipCompress(const char *data, const size_t ndata)
 {
-    z_stream strm = {0};
+    z_stream strm = {nullptr,
+                     0,
+                     0,
+                     nullptr,
+                     0,
+                     0,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     0,
+                     0,
+                     0};
     if (data && ndata > 0)
     {
         if (deflateInit2(&strm,
@@ -884,7 +897,20 @@ std::string gzipDecompress(const char *data, const size_t ndata)
     auto decompressed = std::string(full_length * 2, 0);
     bool done = false;
 
-    z_stream strm = {0};
+    z_stream strm = {nullptr,
+                     0,
+                     0,
+                     nullptr,
+                     0,
+                     0,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     0,
+                     0,
+                     0};
     strm.next_in = (Bytef *)data;
     strm.avail_in = static_cast<uInt>(ndata);
     strm.total_out = 0;
@@ -1135,13 +1161,13 @@ std::string brotliDecompress(const char *data, const size_t ndata)
     return decompressed;
 }
 #else
-std::string brotliCompress(const char *data, const size_t ndata)
+std::string brotliCompress(const char * /*data*/, const size_t /*ndata*/)
 {
     LOG_ERROR << "If you do not have the brotli package installed, you cannot "
                  "use brotliCompress()";
     abort();
 }
-std::string brotliDecompress(const char *data, const size_t ndata)
+std::string brotliDecompress(const char * /*data*/, const size_t /*ndata*/)
 {
     LOG_ERROR << "If you do not have the brotli package installed, you cannot "
                  "use brotliDecompress()";
@@ -1171,6 +1197,49 @@ void replaceAll(std::string &s, const std::string &from, const std::string &to)
         s.replace(pos, from.size(), to);
         pos += to.size();
     }
+}
+
+/**
+ * @brief Generates `size` random bytes from the systems random source and
+ * stores them into `ptr`.
+ */
+static bool systemRandomBytes(void *ptr, size_t size)
+{
+#if defined(__BSD__) || defined(__APPLE__)
+    arc4random_buf(ptr, size);
+    return true;
+#elif defined(__linux__) && \
+    ((defined(__GLIBC__) && \
+      (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))))
+    return getentropy(ptr, size) != -1;
+#elif defined(_WIN32)    // Windows
+    return RtlGenRandom(ptr, size);
+#elif defined(__unix__)  // fallback to /dev/urandom for other/old UNIX
+    static std::unique_ptr<FILE, std::function<void(FILE *)> > fptr(
+        fopen("/dev/urandom", "rb"), [](FILE *ptr) {
+            if (ptr != nullptr)
+                fclose(ptr);
+        });
+    if (fptr == nullptr)
+    {
+        LOG_FATAL << "Failed to open /dev/urandom for randomness";
+        abort();
+    }
+    if (fread(ptr, 1, size, fptr.get()) != 0)
+        return true;
+#endif
+    return false;
+}
+
+bool secureRandomBytes(void *ptr, size_t size)
+{
+#ifdef OpenSSL_FOUND
+    if (RAND_bytes((unsigned char *)ptr, size) == 0)
+        return true;
+#endif
+    if (systemRandomBytes(ptr, size))
+        return true;
+    return false;
 }
 
 }  // namespace utils
