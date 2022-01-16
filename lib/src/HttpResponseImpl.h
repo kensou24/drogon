@@ -44,7 +44,7 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
           creationDate_(trantor::Date::now()),
           contentType_(type),
           flagForParsingContentType_(true),
-          contentTypeString_(webContentTypeToString(type))
+          contentTypeString_(contentTypeToMime(type))
     {
     }
     void setPassThrough(bool flag) override
@@ -81,6 +81,8 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
         return version_;
     }
 
+    virtual const char *versionString() const override;
+
     void setCloseConnection(bool on) override
     {
         closeConnection_ = on;
@@ -94,7 +96,8 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
     void setContentTypeCode(ContentType type) override
     {
         contentType_ = type;
-        setContentType(webContentTypeToString(type));
+        auto ct = contentTypeToMime(type);
+        contentTypeString_ = std::string(ct.data(), ct.size());
         flagForParsingContentType_ = true;
     }
 
@@ -107,29 +110,7 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
 
     ContentType contentType() const override
     {
-        if (!flagForParsingContentType_)
-        {
-            flagForParsingContentType_ = true;
-            auto &contentTypeString = getHeaderBy("content-type");
-            if (contentTypeString.empty())
-            {
-                contentType_ = CT_NONE;
-            }
-            else
-            {
-                auto pos = contentTypeString.find(';');
-                if (pos != std::string::npos)
-                {
-                    contentType_ = parseContentType(
-                        string_view(contentTypeString.data(), pos));
-                }
-                else
-                {
-                    contentType_ =
-                        parseContentType(string_view(contentTypeString));
-                }
-            }
-        }
+        parseContentTypeAndString();
         return contentType_;
     }
 
@@ -313,18 +294,33 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
     }
     bool shouldBeCompressed() const;
     void generateBodyFromJson() const;
-    const std::string &sendfileName() const
+    const std::string &sendfileName() const override
     {
         return sendfileName_;
+    }
+    const SendfileRange &sendfileRange() const override
+    {
+        return sendfileRange_;
     }
     void setSendfile(const std::string &filename)
     {
         sendfileName_ = filename;
     }
+    void setSendfileRange(size_t offset, size_t len)
+    {
+        sendfileRange_.first = offset;
+        sendfileRange_.second = len;
+    }
     void makeHeaderString()
     {
         fullHeaderString_ = std::make_shared<trantor::MsgBuffer>(128);
         makeHeaderString(*fullHeaderString_);
+    }
+
+    std::string contentTypeString() const override
+    {
+        parseContentTypeAndString();
+        return contentTypeString_;
     }
 
     void gunzip()
@@ -358,6 +354,37 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
   protected:
     void makeHeaderString(trantor::MsgBuffer &headerString);
 
+    void parseContentTypeAndString() const
+    {
+        if (!flagForParsingContentType_)
+        {
+            flagForParsingContentType_ = true;
+            auto &contentTypeString = getHeaderBy("content-type");
+            if (contentTypeString == "")
+            {
+                contentType_ = CT_NONE;
+            }
+            else
+            {
+                auto pos = contentTypeString.find(';');
+                if (pos != std::string::npos)
+                {
+                    contentType_ = parseContentType(
+                        string_view(contentTypeString.data(), pos));
+                }
+                else
+                {
+                    contentType_ =
+                        parseContentType(string_view(contentTypeString));
+                }
+
+                if (contentType_ == CT_NONE)
+                    contentType_ = CT_CUSTOM;
+                contentTypeString_ = contentTypeString;
+            }
+        }
+    }
+
   private:
     void setBody(const char *body, size_t len) override
     {
@@ -373,8 +400,22 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
     {
         contentType_ = type;
         flagForParsingContentType_ = true;
-        setContentType(string_view{typeString, typeStringLength});
+
+        string_view sv(typeString, typeStringLength);
+        bool haveHeader = sv.find("content-type: ") == 0;
+        bool haveCRLF = sv.rfind("\r\n") == sv.size() - 2;
+
+        size_t endOffset = 0;
+        if (haveHeader)
+            endOffset += 14;
+        if (haveCRLF)
+            endOffset += 2;
+        setContentType(string_view{typeString + (haveHeader ? 14 : 0),
+                                   typeStringLength - endOffset});
     }
+
+    void setContentTypeString(const char *typeString,
+                              size_t typeStringLength) override;
 
     void setCustomStatusCode(int code,
                              const char *message,
@@ -398,6 +439,8 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
     mutable std::shared_ptr<HttpMessageBody> bodyPtr_;
     ssize_t expriedTime_{-1};
     std::string sendfileName_;
+    SendfileRange sendfileRange_{0, 0};
+
     mutable std::shared_ptr<Json::Value> jsonPtr_;
 
     std::shared_ptr<trantor::MsgBuffer> fullHeaderString_;
@@ -409,12 +452,12 @@ class DROGON_EXPORT HttpResponseImpl : public HttpResponse
     mutable ContentType contentType_{CT_TEXT_PLAIN};
     mutable bool flagForParsingContentType_{false};
     mutable std::shared_ptr<std::string> jsonParsingErrorPtr_;
-    string_view contentTypeString_{
-        "content-type: text/html; charset=utf-8\r\n"};
+    mutable std::string contentTypeString_{"text/html; charset=utf-8"};
     bool passThrough_{false};
     void setContentType(const string_view &contentType)
     {
-        contentTypeString_ = contentType;
+        contentTypeString_ =
+            std::string(contentType.data(), contentType.size());
     }
     void setStatusMessage(const string_view &message)
     {

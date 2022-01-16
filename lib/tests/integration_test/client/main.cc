@@ -66,8 +66,19 @@ void doTest(const HttpClientPtr &client, std::shared_ptr<test::Case> TEST_CTX)
     else
         client->addCookie(sessionID);
 
-    /// Test session
+    /// Test begin advice
     auto req = HttpRequest::newHttpRequest();
+    req->setMethod(drogon::Get);
+    req->setPath("/test_begin_advice");
+    client->sendRequest(req,
+                        [req, client, TEST_CTX](ReqResult result,
+                                                const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->getBody() == "DrogonReady");
+                        });
+
+    /// Test session
+    req = HttpRequest::newHttpRequest();
     req->setMethod(drogon::Get);
     req->setPath("/slow");
     client->sendRequest(
@@ -491,12 +502,13 @@ void doTest(const HttpClientPtr &client, std::shared_ptr<test::Case> TEST_CTX)
     req = HttpRequest::newHttpRequest();
     req->setMethod(drogon::Get);
     req->setPath("/index.html");
-    client->sendRequest(req,
-                        [req, TEST_CTX](ReqResult result,
-                                        const HttpResponsePtr &resp) {
-                            REQUIRE(result == ReqResult::Ok);
-                            CHECK(resp->getBody().length() == indexLen);
-                        });
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getBody().length() == indexLen);
+            CHECK(resp->contentType() == CT_TEXT_HTML);
+            CHECK(resp->contentTypeString().find("text/html") == 0);
+        });
     req = HttpRequest::newHttpRequest();
     req->setMethod(drogon::Get);
     req->setPath("/index.html");
@@ -505,8 +517,38 @@ void doTest(const HttpClientPtr &client, std::shared_ptr<test::Case> TEST_CTX)
                         [req, TEST_CTX](ReqResult result,
                                         const HttpResponsePtr &resp) {
                             REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->contentType() == CT_TEXT_HTML);
                             CHECK(resp->getBody().length() == indexLen);
                         });
+    /// Test serving file with non-ASCII files
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/中文.txt");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            // Only tests for serving a file, not the content
+                            // since no good way to read it on Windows witout
+                            // using the wild-char API
+                        });
+    /// Test custom content types
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/test.md");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->contentType() == CT_CUSTOM);
+                            CHECK(resp->contentTypeString() == "text/markdown");
+                        });
+    /// Unknown files shoul be application/octet-stream
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/main.cc");
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            REQUIRE(resp->contentType() == CT_APPLICATION_OCTET_STREAM);
+        });
     // Test 405
     req = HttpRequest::newHttpRequest();
     req->setMethod(drogon::Post);
@@ -679,6 +721,107 @@ void doTest(const HttpClientPtr &client, std::shared_ptr<test::Case> TEST_CTX)
                             REQUIRE(json != nullptr);
                             CHECK((*json)["P1"] == "upload");
                             CHECK((*json)["P2"] == "test");
+                        });
+
+    // Test newFileResponse
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/RangeTestController/");
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getStatusCode() == k200OK);
+            CHECK(resp->getBody().size() == 1'000'000);
+            CHECK(resp->getHeader("Content-Length") == "1000000");
+        });
+
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/RangeTestController/999980/0");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->getStatusCode() == k206PartialContent);
+                            CHECK(resp->getBody() == "01234567890123456789");
+                        });
+
+    // Test > 200k
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/RangeTestController/1/500000");
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getBody().size() == 500'000);
+            CHECK(resp->getHeader("Content-Length") == "500000");
+            CHECK(resp->getHeader("Content-Range") == "bytes 1-500000/1000000");
+        });
+
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/RangeTestController/10/20");
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            LOG_DEBUG << "result=" << (int)result;
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getStatusCode() == k206PartialContent);
+            CHECK(resp->getBody() == "01234567890123456789");
+            CHECK(resp->getHeader("Content-Length") == "20");
+            CHECK(resp->getHeader("Content-Range") == "bytes 10-29/1000000");
+        });
+
+    // Test invalid range
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/RangeTestController/0/2000000");
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getHeader("Content-Range") == "bytes */1000000");
+            CHECK(resp->getStatusCode() == k416RequestedRangeNotSatisfiable);
+        });
+
+    //
+    // Test StaticFileRouter with range header
+    //
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/range-test.txt");
+    req->setMethod(drogon::Head);
+    client->sendRequest(
+        req, [req, TEST_CTX](ReqResult result, const HttpResponsePtr &resp) {
+            REQUIRE(result == ReqResult::Ok);
+            CHECK(resp->getStatusCode() == k200OK);
+            CHECK(resp->getHeader("content-length") == "1000000");
+            CHECK(resp->getHeader("accept-range") == "bytes");
+        });
+
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/range-test.txt");
+    req->addHeader("range", "bytes=0-19");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->getStatusCode() == k206PartialContent);
+                            CHECK(resp->getBody() == "01234567890123456789");
+                        });
+
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/range-test.txt");
+    req->addHeader("range", "bytes=-20");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->getStatusCode() == k206PartialContent);
+                            CHECK(resp->getBody() == "01234567890123456789");
+                        });
+
+    req = HttpRequest::newHttpRequest();
+    req->setPath("/range-test.txt");
+    req->addHeader("range", "bytes=999980-");
+    client->sendRequest(req,
+                        [req, TEST_CTX](ReqResult result,
+                                        const HttpResponsePtr &resp) {
+                            REQUIRE(result == ReqResult::Ok);
+                            CHECK(resp->getStatusCode() == k206PartialContent);
+                            CHECK(resp->getBody() == "01234567890123456789");
                         });
 
     // Using .. to access a upper directory should be permitted as long as
@@ -918,6 +1061,11 @@ DROGON_TEST(HttpTest)
 {
     auto client = HttpClient::newHttpClient("http://127.0.0.1:8848");
     client->setPipeliningDepth(10);
+    REQUIRE(client->secure() == false);
+    REQUIRE(client->port() == 8848);
+    REQUIRE(client->host() == "127.0.0.1");
+    REQUIRE(client->onDefaultPort() == false);
+
     doTest(client, TEST_CTX);
 }
 
@@ -931,19 +1079,24 @@ DROGON_TEST(HttpsTest)
                                             false,
                                             false);
     client->setPipeliningDepth(10);
+    REQUIRE(client->secure() == true);
+    REQUIRE(client->port() == 8849);
+    REQUIRE(client->host() == "127.0.0.1");
+    REQUIRE(client->onDefaultPort() == false);
+
     doTest(client, TEST_CTX);
 }
 
 int main(int argc, char **argv)
 {
-    trantor::Logger::setLogLevel(trantor::Logger::LogLevel::kDebug);
+    trantor::Logger::setLogLevel(trantor::Logger::LogLevel::kTrace);
     loadFileLengths();
 
     std::promise<void> p1;
     std::future<void> f1 = p1.get_future();
 
-    std::thread thr([&]() {
-        p1.set_value();
+    std::thread thr([&p1]() {
+        app().getLoop()->queueInLoop([&p1]() { p1.set_value(); });
         app().run();
     });
 

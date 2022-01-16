@@ -44,7 +44,7 @@ void HttpRequestImpl::parseJson() const
                            jsonPtr_.get(),
                            &errs))
         {
-            LOG_ERROR << errs;
+            LOG_DEBUG << errs;
             jsonPtr_.reset();
             jsonParsingErrorPtr_ =
                 std::make_unique<std::string>(std::move(errs));
@@ -287,7 +287,8 @@ void HttpRequestImpl::appendToBuffer(trantor::MsgBuffer *output) const
                 content.append("\"; filename=\"");
                 content.append(file.fileName());
                 content.append("\"\r\n\r\n");
-                std::ifstream infile(file.path(), std::ifstream::binary);
+                std::ifstream infile(utils::toNativePath(file.path()),
+                                     std::ifstream::binary);
                 if (!infile)
                 {
                     LOG_ERROR << file.path() << " not found";
@@ -323,8 +324,10 @@ void HttpRequestImpl::appendToBuffer(trantor::MsgBuffer *output) const
             output->append(buf, len);
             if (contentTypeString_.empty())
             {
-                auto &type = webContentTypeToString(contentType_);
+                auto &type = contentTypeToMime(contentType_);
+                output->append("content-type: ");
                 output->append(type.data(), type.length());
+                output->append("\r\n");
             }
         }
         else if (method_ == Post || method_ == Put || method_ == Options ||
@@ -334,7 +337,9 @@ void HttpRequestImpl::appendToBuffer(trantor::MsgBuffer *output) const
         }
         if (!contentTypeString_.empty())
         {
+            output->append("content-type: ");
             output->append(contentTypeString_);
+            output->append("\r\n");
         }
     }
     for (auto it = headers_.begin(); it != headers_.end(); ++it)
@@ -547,6 +552,25 @@ void HttpRequestImpl::swap(HttpRequestImpl &that) noexcept
     swap(jsonParsingErrorPtr_, that.jsonParsingErrorPtr_);
 }
 
+const char *HttpRequestImpl::versionString() const
+{
+    const char *result = "UNKNOWN";
+    switch (version_)
+    {
+        case Version::kHttp10:
+            result = "HTTP/1.0";
+            break;
+
+        case Version::kHttp11:
+            result = "HTTP/1.1";
+            break;
+
+        default:
+            break;
+    }
+    return result;
+}
+
 const char *HttpRequestImpl::methodString() const
 {
     const char *result = "UNKNOWN";
@@ -709,4 +733,16 @@ void HttpRequestImpl::createTmpFile()
         .append("/")
         .append(fileName);
     cacheFilePtr_ = std::make_unique<CacheFile>(tmpfile);
+}
+
+void HttpRequestImpl::setContentTypeString(const char *typeString,
+                                           size_t typeStringLength)
+{
+    std::string sv(typeString, typeStringLength);
+    auto contentType = parseContentType(sv);
+    if (contentType == CT_NONE)
+        contentType = CT_CUSTOM;
+    contentType_ = contentType;
+    contentTypeString_ = std::string(sv);
+    flagForParsingContentType_ = true;
 }

@@ -59,6 +59,8 @@ set(INTEGRATION_TEST_SERVER_SOURCES
     integration_test/server/TimeFilter.cc
     integration_test/server/DigestAuthFilter.cc
     integration_test/server/MethodTest.cc
+    integration_test/server/RangeTestController.cc
+    integration_test/server/BeginAdviceTest.cc
     integration_test/server/main.cc)
 
 if(DROGON_CXX_STANDARD GREATER_EQUAL 20 AND HAS_COROUTINE)
@@ -81,7 +83,10 @@ add_custom_command(
           ${PROJECT_SOURCE_DIR}/config.example.json
           ${PROJECT_SOURCE_DIR}/drogon.jpg
           ${CMAKE_CURRENT_SOURCE_DIR}/integration_test/server/index.html
+          ${CMAKE_CURRENT_SOURCE_DIR}/integration_test/server/main.cc
+          ${CMAKE_CURRENT_SOURCE_DIR}/integration_test/server/test.md
           ${CMAKE_CURRENT_SOURCE_DIR}/integration_test/server/index.html.gz
+          ${CMAKE_CURRENT_SOURCE_DIR}/integration_test/server/中文.txt
           ${PROJECT_SOURCE_DIR}/trantor/trantor/tests/server.pem
           $<TARGET_FILE_DIR:integration_test_server>)
 add_custom_command(

@@ -39,7 +39,12 @@ void HttpClientImpl::createTcpClient()
     {
         LOG_TRACE << "useOldTLS=" << useOldTLS_;
         LOG_TRACE << "domain=" << domain_;
-        tcpClientPtr_->enableSSL(useOldTLS_, validateCert_, domain_);
+        tcpClientPtr_->enableSSL(useOldTLS_,
+                                 validateCert_,
+                                 domain_,
+                                 sslConfCmds_,
+                                 clientCertPath_,
+                                 clientKeyPath_);
     }
 #endif
     auto thisPtr = shared_from_this();
@@ -319,32 +324,15 @@ void HttpClientImpl::sendRequestInLoop(const drogon::HttpRequestPtr &req,
             req->addHeader("user-agent", userAgent_);
     }
     // Set the host header.
-    if (!domain_.empty())
+    if (onDefaultPort())
     {
-        if ((useSSL_ && serverAddr_.toPort() != 443) ||
-            (!useSSL_ && serverAddr_.toPort() != 80))
-        {
-            std::string host =
-                domain_ + ":" + std::to_string(serverAddr_.toPort());
-            req->addHeader("host", host);
-        }
-        else
-        {
-            req->addHeader("host", domain_);
-        }
+        req->addHeader("host", host());
     }
     else
     {
-        if ((useSSL_ && serverAddr_.toPort() != 443) ||
-            (!useSSL_ && serverAddr_.toPort() != 80))
-        {
-            req->addHeader("host", serverAddr_.toIpPort());
-        }
-        else
-        {
-            req->addHeader("host", serverAddr_.toIp());
-        }
+        req->addHeader("host", host() + ":" + std::to_string(port()));
     }
+
     for (auto &cookie : validCookies_)
     {
         if ((cookie.expiresDate().microSecondsSinceEpoch() == 0 ||
@@ -357,12 +345,13 @@ void HttpClientImpl::sendRequestInLoop(const drogon::HttpRequestPtr &req,
 
     if (!tcpClientPtr_)
     {
+        auto callbackPtr =
+            std::make_shared<drogon::HttpReqCallback>(std::move(callback));
         requestsBuffer_.push_back(
             {req,
              [thisPtr = shared_from_this(),
-              callback = std::move(callback)](ReqResult result,
-                                              const HttpResponsePtr &response) {
-                 callback(result, response);
+              callbackPtr](ReqResult result, const HttpResponsePtr &response) {
+                 (*callbackPtr)(result, response);
              }});
         if (!dns_)
         {
@@ -434,7 +423,7 @@ void HttpClientImpl::sendRequestInLoop(const drogon::HttpRequestPtr &req,
             else
             {
                 requestsBuffer_.pop_front();
-                callback(ReqResult::BadServerAddress, nullptr);
+                (*callbackPtr)(ReqResult::BadServerAddress, nullptr);
                 assert(requestsBuffer_.empty());
                 return;
             }
@@ -660,5 +649,21 @@ void HttpClientImpl::handleCookies(const HttpResponseImplPtr &resp)
         {
             validCookies_.emplace_back(cookie);
         }
+    }
+}
+
+void HttpClientImpl::setCertPath(const std::string &cert,
+                                 const std::string &key)
+{
+    clientCertPath_ = cert;
+    clientKeyPath_ = key;
+}
+
+void HttpClientImpl::addSSLConfigs(
+    const std::vector<std::pair<std::string, std::string>> &sslConfCmds)
+{
+    for (const auto &cmd : sslConfCmds)
+    {
+        sslConfCmds_.push_back(cmd);
     }
 }

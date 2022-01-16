@@ -118,7 +118,7 @@ static void parseLine(std::ofstream &oSrcFile,
     {
         // std::cout<<"blank line!"<<std::endl;
         // std::cout<<streamName<<"<<\"\\n\";\n";
-        if (returnFlag)
+        if (returnFlag && !cxx_flag)
             oSrcFile << streamName << "<<\"\\n\";\n";
         return;
     }
@@ -291,7 +291,8 @@ void create_view::createViewFiles(std::vector<std::string> &cspFileNames)
     for (auto const &file : cspFileNames)
     {
         std::cout << "create view:" << file << std::endl;
-        createViewFile(file);
+        if (createViewFile(file) != 0)
+            exit(1);
     }
 }
 int create_view::createViewFile(const std::string &script_filename)

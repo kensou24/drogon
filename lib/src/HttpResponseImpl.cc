@@ -17,14 +17,14 @@
 #include "HttpUtils.h"
 #include <drogon/HttpViewData.h>
 #include <drogon/IOThreadStorage.h>
+#include "filesystem.h"
 #include <fstream>
 #include <memory>
 #include <cstdio>
+#include <string>
 #include <sys/stat.h>
 #include <trantor/utils/Logger.h>
-#ifdef _WIN32
-#define stat _stati64
-#endif
+
 using namespace trantor;
 using namespace drogon;
 
@@ -80,6 +80,25 @@ HttpResponsePtr HttpResponse::newHttpJsonResponse(Json::Value &&data)
     res->setJsonObject(std::move(data));
     doResponseCreateAdvices(res);
     return res;
+}
+
+const char *HttpResponseImpl::versionString() const
+{
+    const char *result = "UNKNOWN";
+    switch (version_)
+    {
+        case Version::kHttp10:
+            result = "HTTP/1.0";
+            break;
+
+        case Version::kHttp11:
+            result = "HTTP/1.1";
+            break;
+
+        default:
+            break;
+    }
+    return result;
 }
 
 void HttpResponseImpl::generateBodyFromJson() const
@@ -191,7 +210,8 @@ HttpResponsePtr HttpResponse::newFileResponse(
     const unsigned char *pBuffer,
     size_t bufferLength,
     const std::string &attachmentFileName,
-    ContentType type)
+    ContentType type,
+    const std::string &typeString)
 {
     // Make Raw HttpResponse
     auto resp = std::make_shared<HttpResponseImpl>();
@@ -204,7 +224,19 @@ HttpResponsePtr HttpResponse::newFileResponse(
     resp->setStatusCode(k200OK);
 
     // Check for type and assign proper content type in header
-    if (type != CT_NONE)
+    if (!typeString.empty())
+    {
+        auto contentType = type;
+        if (type == CT_NONE)
+            type = parseContentType(typeString);
+        if (type == CT_NONE)
+            type = CT_APPLICATION_OCTET_STREAM;  // XXX: Is this Ok?
+        static_cast<HttpResponse *>(resp.get())
+            ->setContentTypeCodeAndCustomString(type,
+                                                typeString.c_str(),
+                                                typeString.size());
+    }
+    else if (type != CT_NONE)
     {
         resp->setContentTypeCode(type);
     }
@@ -233,10 +265,25 @@ HttpResponsePtr HttpResponse::newFileResponse(
 HttpResponsePtr HttpResponse::newFileResponse(
     const std::string &fullPath,
     const std::string &attachmentFileName,
-    ContentType type)
+    ContentType type,
+    const std::string &typeString)
 {
-    std::ifstream infile(fullPath, std::ifstream::binary);
-    LOG_TRACE << "send http file:" << fullPath;
+    return newFileResponse(
+        fullPath, 0, 0, false, attachmentFileName, type, typeString);
+}
+
+HttpResponsePtr HttpResponse::newFileResponse(
+    const std::string &fullPath,
+    size_t offset,
+    size_t length,
+    bool setContentRange,
+    const std::string &attachmentFileName,
+    ContentType type,
+    const std::string &typeString)
+{
+    std::ifstream infile(utils::toNativePath(fullPath), std::ifstream::binary);
+    LOG_TRACE << "send http file:" << fullPath << " offset " << offset
+              << " length " << length;
     if (!infile)
     {
         auto resp = HttpResponse::newNotFoundResponse();
@@ -245,26 +292,67 @@ HttpResponsePtr HttpResponse::newFileResponse(
     auto resp = std::make_shared<HttpResponseImpl>();
     std::streambuf *pbuf = infile.rdbuf();
     std::streamsize filesize = pbuf->pubseekoff(0, std::ifstream::end);
-    pbuf->pubseekoff(0, std::ifstream::beg);  // rewind
-    if (HttpAppFrameworkImpl::instance().useSendfile() && filesize > 1024 * 200)
+    if (offset > filesize || length > filesize ||  // in case of overflow
+        offset + length > filesize)
+    {
+        resp->setStatusCode(k416RequestedRangeNotSatisfiable);
+        if (setContentRange)
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "bytes */%zu", filesize);
+            resp->addHeader("Content-Range", std::string(buf));
+        }
+        return resp;
+    }
+    if (length == 0)
+    {
+        length = filesize - offset;
+    }
+    pbuf->pubseekoff(offset, std::ifstream::beg);  // rewind
+
+    if (HttpAppFrameworkImpl::instance().useSendfile() && length > 1024 * 200)
     // TODO : Is 200k an appropriate value? Or set it to be configurable
     {
         // The advantages of sendfile() can only be reflected in sending large
         // files.
         resp->setSendfile(fullPath);
+        // Must set length with the right value! Content-Length header relys on
+        // this value.
+        resp->setSendfileRange(offset, length);
     }
     else
     {
         std::string str;
-        str.resize(filesize);
-        pbuf->sgetn(&str[0], filesize);
+        str.resize(length);
+        pbuf->sgetn(&str[0], length);
         resp->setBody(std::move(str));
+        resp->setSendfileRange(offset, length);
     }
-    resp->setStatusCode(k200OK);
 
+    // Set correct status code
+    if (length < filesize)
+    {
+        resp->setStatusCode(k206PartialContent);
+    }
+    else
+    {
+        resp->setStatusCode(k200OK);
+    }
+
+    // Infer content type
     if (type == CT_NONE)
     {
-        if (!attachmentFileName.empty())
+        if (!typeString.empty())
+        {
+            auto r = static_cast<HttpResponse *>(resp.get());
+            auto contentType = type;
+            if (type == CT_NONE)
+                type = parseContentType(typeString);
+            if (type == CT_NONE)
+                type = CT_CUSTOM;  // XXX: Is this Ok?
+            r->setContentTypeCodeAndCustomString(type, typeString);
+        }
+        else if (!attachmentFileName.empty())
         {
             resp->setContentTypeCode(
                 drogon::getContentType(attachmentFileName));
@@ -276,13 +364,36 @@ HttpResponsePtr HttpResponse::newFileResponse(
     }
     else
     {
-        resp->setContentTypeCode(type);
+        if (typeString.empty())
+            resp->setContentTypeCode(type);
+        else
+        {
+            auto r = static_cast<HttpResponse *>(resp.get());
+            auto contentType = type;
+            if (type == CT_NONE)
+                type = parseContentType(typeString);
+            if (type == CT_NONE)
+                type = CT_CUSTOM;  // XXX: Is this Ok?
+            r->setContentTypeCodeAndCustomString(type, typeString);
+        }
     }
 
+    // Set headers
     if (!attachmentFileName.empty())
     {
         resp->addHeader("Content-Disposition",
                         "attachment; filename=" + attachmentFileName);
+    }
+    if (setContentRange && length > 0)
+    {
+        char buf[128];
+        snprintf(buf,
+                 sizeof(buf),
+                 "bytes %zu-%zu/%zu",
+                 offset,
+                 offset + length - 1,
+                 filesize);
+        resp->addHeader("Content-Range", std::string(buf));
     }
     doResponseCreateAdvices(resp);
     return resp;
@@ -345,19 +456,11 @@ void HttpResponseImpl::makeHeaderString(trantor::MsgBuffer &buffer)
         }
         else
         {
-            struct stat filestat
-            {
-            };
-            if (stat(sendfileName_.data(), &filestat) < 0)
-            {
-                LOG_SYSERR << sendfileName_ << " stat error";
-                return;
-            }
-            len = snprintf(
-                buffer.beginWrite(),
-                buffer.writableBytes(),
-                contentLengthFormatString<decltype(filestat.st_size)>(),
-                filestat.st_size);
+            auto bodyLength = sendfileRange_.second;
+            len = snprintf(buffer.beginWrite(),
+                           buffer.writableBytes(),
+                           contentLengthFormatString<decltype(bodyLength)>(),
+                           bodyLength);
         }
         buffer.hasWritten(len);
         if (headers_.find("connection") == headers_.end())
@@ -371,7 +474,13 @@ void HttpResponseImpl::makeHeaderString(trantor::MsgBuffer &buffer)
                 buffer.append("connection: Keep-Alive\r\n");
             }
         }
-        buffer.append(contentTypeString_.data(), contentTypeString_.length());
+
+        if (!contentTypeString_.empty())
+        {
+            buffer.append("content-type: ");
+            buffer.append(contentTypeString_);
+            buffer.append("\r\n");
+        }
         if (HttpAppFrameworkImpl::instance().sendServerHeader())
         {
             buffer.append(
@@ -633,6 +742,25 @@ void HttpResponseImpl::addHeader(const char *start,
                 {
                     cookie.setHttpOnly(true);
                 }
+                else if (cookie_name == "samesite")
+                {
+                    if (cookie_value == "Lax")
+                    {
+                        cookie.setSameSite(Cookie::SameSite::kLax);
+                    }
+                    else if (cookie_value == "Strict")
+                    {
+                        cookie.setSameSite(Cookie::SameSite::kStrict);
+                    }
+                    else if (cookie_value == "None")
+                    {
+                        cookie.setSameSite(Cookie::SameSite::kNone);
+                    }
+                }
+                else if (cookie_name == "max-age")
+                {
+                    cookie.setMaxAge(std::stoi(cookie_value));
+                }
             }
         }
         if (!cookie.key().empty())
@@ -728,4 +856,16 @@ bool HttpResponseImpl::shouldBeCompressed() const
         return false;
     }
     return true;
+}
+
+void HttpResponseImpl::setContentTypeString(const char *typeString,
+                                            size_t typeStringLength)
+{
+    std::string sv(typeString, typeStringLength);
+    auto contentType = parseContentType(sv);
+    if (contentType == CT_NONE)
+        contentType = CT_CUSTOM;
+    contentType_ = contentType;
+    contentTypeString_ = std::string(sv);
+    flagForParsingContentType_ = true;
 }

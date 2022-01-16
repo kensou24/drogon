@@ -16,6 +16,7 @@
 #include "HttpRequestImpl.h"
 #include "HttpClientImpl.h"
 #include "HttpResponseImpl.h"
+#include "HttpUtils.h"
 #include "WebSocketConnectionImpl.h"
 #include "StaticFileRouter.h"
 #include "HttpSimpleControllersRouter.h"
@@ -40,6 +41,7 @@
 #include <drogon/HttpTypes.h>
 #include <drogon/Session.h>
 #include <drogon/utils/Utilities.h>
+#include "filesystem.h"
 #include <trantor/utils/AsyncFileLogger.h>
 #include <json/json.h>
 
@@ -58,8 +60,16 @@
 #include <sys/file.h>
 #include <uuid.h>
 #include <unistd.h>
+#define os_access access
+#elif !defined(_WIN32) || defined(__MINGW32__)
+#include <sys/file.h>
+#include <unistd.h>
+#define os_access access
 #else
 #include <io.h>
+#define os_access _waccess
+#define R_OK 04
+#define W_OK 02
 #endif
 
 using namespace drogon;
@@ -175,6 +185,11 @@ static void TERMFunction(int sig)
     {
         LOG_WARN << "SIGTERM signal received.";
         HttpAppFrameworkImpl::instance().getTermSignalHandler()();
+    }
+    else if (sig == SIGINT)
+    {
+        LOG_WARN << "SIGINT signal received.";
+        HttpAppFrameworkImpl::instance().getIntSignalHandler()();
     }
 }
 
@@ -393,20 +408,14 @@ HttpAppFramework &HttpAppFrameworkImpl::setLogPath(
 {
     if (logPath.empty())
         return *this;
-#ifdef _WIN32
-    if (_access(logPath.c_str(), 0) != 0)
-#else
-    if (access(logPath.c_str(), 0) != 0)
-#endif
+    // std::filesystem does not provide a method to check access permissions, so
+    // keep existing code
+    if (os_access(utils::toNativePath(logPath).c_str(), 0) != 0)
     {
         std::cerr << "Log path does not exist!\n";
         exit(1);
     }
-#ifdef _WIN32
-    if (_access(logPath.c_str(), 06) != 0)
-#else
-    if (access(logPath.c_str(), R_OK | W_OK) != 0)
-#endif
+    if (os_access(utils::toNativePath(logPath).c_str(), R_OK | W_OK) != 0)
     {
         std::cerr << "Unable to access log path!\n";
         exit(1);
@@ -443,7 +452,6 @@ void HttpAppFrameworkImpl::run()
         getLoop()->moveToCurrentThread();
     }
     LOG_TRACE << "Start to run...";
-    trantor::AsyncFileLogger asyncFileLogger;
     // Create dirs for cache files
     for (int i = 0; i < 256; ++i)
     {
@@ -488,37 +496,27 @@ void HttpAppFrameworkImpl::run()
     }
     if (handleSigterm_)
     {
+#ifdef WIN32
         signal(SIGTERM, TERMFunction);
-    }
-    // set logger
-    if (!logPath_.empty())
-    {
-#ifdef _WIN32
-        if (_access(logPath_.c_str(), 06) != 0)
+        signal(SIGINT, TERMFunction);
 #else
-        if (access(logPath_.c_str(), R_OK | W_OK) != 0)
-#endif
+        struct sigaction sa;
+        sa.sa_handler = TERMFunction;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        if (sigaction(SIGINT, &sa, NULL) == -1)
         {
-            LOG_ERROR << "log file path not exist";
+            LOG_ERROR << "sigaction() failed, can't set SIGINT handler";
             abort();
         }
-        else
+        if (sigaction(SIGTERM, &sa, NULL) == -1)
         {
-            std::string baseName = logfileBaseName_;
-            if (baseName.empty())
-            {
-                baseName = "drogon";
-            }
-            asyncFileLogger.setFileName(baseName, ".log", logPath_);
-            asyncFileLogger.startLogging();
-            trantor::Logger::setOutputFunction(
-                [&](const char *msg, const uint64_t len) {
-                    asyncFileLogger.output(msg, len);
-                },
-                [&]() { asyncFileLogger.flush(); });
-            asyncFileLogger.setFileSizeLimit(logfileSize_);
+            LOG_ERROR << "sigaction() failed, can't set SIGTERM handler";
+            abort();
         }
+#endif
     }
+    setupFileLogger();
     if (relaunchOnError_)
     {
         LOG_INFO << "Start child process";
@@ -586,13 +584,13 @@ void HttpAppFrameworkImpl::run()
     staticFileRouterPtr_->init(ioLoops);
     websockCtrlsRouterPtr_->init();
     getLoop()->queueInLoop([this]() {
-        // Let listener event loops run when everything is ready.
-        listenerManagerPtr_->startListening();
         for (auto &adv : beginningAdvices_)
         {
             adv();
         }
         beginningAdvices_.clear();
+        // Let listener event loops run when everything is ready.
+        listenerManagerPtr_->startListening();
     });
     getLoop()->loop();
 }
@@ -666,22 +664,14 @@ HttpAppFramework &HttpAppFrameworkImpl::setUploadPath(
     const std::string &uploadPath)
 {
     assert(!uploadPath.empty());
-    if (uploadPath[0] == '/' ||
-        (uploadPath.length() >= 2 && uploadPath[0] == '.' &&
-         uploadPath[1] == '/') ||
-        (uploadPath.length() >= 3 && uploadPath[0] == '.' &&
-         uploadPath[1] == '.' && uploadPath[2] == '/') ||
-        uploadPath == "." || uploadPath == "..")
+
+    filesystem::path fsUploadPath(utils::toNativePath(uploadPath));
+    if (!fsUploadPath.is_absolute())
     {
-        uploadPath_ = uploadPath;
+        filesystem::path fsRoot(utils::toNativePath(rootPath_));
+        fsUploadPath = fsRoot / fsUploadPath;
     }
-    else
-    {
-        if (rootPath_[rootPath_.length() - 1] == '/')
-            uploadPath_ = rootPath_ + uploadPath;
-        else
-            uploadPath_ = rootPath_ + "/" + uploadPath;
-    }
+    uploadPath_ = utils::fromNativePath(fsUploadPath.native());
     return *this;
 }
 void HttpAppFrameworkImpl::findSessionForRequest(const HttpRequestImplPtr &req)
@@ -1100,5 +1090,45 @@ HttpAppFramework &HttpAppFrameworkImpl::setDefaultHandler(
     DefaultHandler handler)
 {
     staticFileRouterPtr_->setDefaultHandler(std::move(handler));
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setupFileLogger()
+{
+    if (!logPath_.empty() && !asyncFileLoggerPtr_)
+    {
+        // std::filesystem does not provide a method to check access
+        // permissions, so keep existing code
+        if (os_access(utils::toNativePath(logPath_).c_str(), R_OK | W_OK) != 0)
+        {
+            LOG_ERROR << "log file path not exist";
+            abort();
+        }
+        else
+        {
+            std::string baseName = logfileBaseName_;
+            if (baseName.empty())
+            {
+                baseName = "drogon";
+            }
+            asyncFileLoggerPtr_ = std::make_unique<trantor::AsyncFileLogger>();
+            asyncFileLoggerPtr_->setFileName(baseName, ".log", logPath_);
+            asyncFileLoggerPtr_->startLogging();
+            trantor::Logger::setOutputFunction(
+                [this](const char *msg, const uint64_t len) {
+                    asyncFileLoggerPtr_->output(msg, len);
+                },
+                [this]() { asyncFileLoggerPtr_->flush(); });
+            asyncFileLoggerPtr_->setFileSizeLimit(logfileSize_);
+        }
+    }
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerCustomExtensionMime(
+    const std::string &ext,
+    const std::string &mime)
+{
+    drogon::registerCustomExtensionMime(ext, mime);
     return *this;
 }

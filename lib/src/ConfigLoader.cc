@@ -20,11 +20,16 @@
 #include <sstream>
 #include <thread>
 #include <trantor/utils/Logger.h>
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(__MINGW32__)
 #include <unistd.h>
+#define os_access access
 #else
 #include <io.h>
+#define os_access _waccess
+#define R_OK 04
+#define W_OK 02
 #endif
+#include <drogon/utils/Utilities.h>
 
 using namespace drogon;
 static bool bytesSize(std::string &sizeStr, size_t &size)
@@ -94,27 +99,20 @@ static bool bytesSize(std::string &sizeStr, size_t &size)
 }
 ConfigLoader::ConfigLoader(const std::string &configFile)
 {
-#ifdef _WIN32
-    if (_access(configFile.c_str(), 0) != 0)
-#else
-    if (access(configFile.c_str(), 0) != 0)
-#endif
+    if (os_access(drogon::utils::toNativePath(configFile).c_str(), 0) != 0)
     {
         std::cerr << "Config file " << configFile << " not found!" << std::endl;
         exit(1);
     }
-#ifdef _WIN32
-    if (_access(configFile.c_str(), 04) != 0)
-#else
-    if (access(configFile.c_str(), R_OK) != 0)
-#endif
+    if (os_access(drogon::utils::toNativePath(configFile).c_str(), R_OK) != 0)
     {
         std::cerr << "No permission to read config file " << configFile
                   << std::endl;
         exit(1);
     }
     configFile_ = configFile;
-    std::ifstream infile(configFile.c_str(), std::ifstream::in);
+    std::ifstream infile(drogon::utils::toNativePath(configFile).c_str(),
+                         std::ifstream::in);
     if (infile)
     {
         try
@@ -476,6 +474,26 @@ static void loadApp(const Json::Value &app)
         app.get("use_implicit_page", true).asBool());
     drogon::app().setImplicitPage(
         app.get("implicit_page", "index.html").asString());
+    auto mimes = app["mime"];
+    if (!mimes.isNull())
+    {
+        auto names = mimes.getMemberNames();
+        for (const auto &mime : names)
+        {
+            auto ext = mimes[mime];
+            std::vector<std::string> exts;
+            if (ext.isString())
+                exts.push_back(ext.asString());
+            else if (ext.isArray())
+            {
+                for (const auto &extension : ext)
+                    exts.push_back(extension.asString());
+            }
+
+            for (const auto &extension : exts)
+                drogon::app().registerCustomExtensionMime(extension, mime);
+        }
+    }
 }
 static void loadDbClients(const Json::Value &dbClients)
 {

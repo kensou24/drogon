@@ -17,9 +17,11 @@
 #include <drogon/plugins/AccessLogger.h>
 #include <regex>
 #include <thread>
-#ifndef _WIN32
+#if !defined _WIN32 && !defined __HAIKU__
 #include <unistd.h>
 #include <sys/syscall.h>
+#elif defined __HAIKU__
+#include <unistd.h>
 #else
 #include <sstream>
 #endif
@@ -33,6 +35,10 @@ using namespace drogon::plugin;
 void AccessLogger::initAndStart(const Json::Value &config)
 {
     useLocalTime_ = config.get("use_local_time", true).asBool();
+    showMicroseconds_ = config.get("show_microseconds", true).asBool();
+    timeFormat_ = config.get("custom_time_format", "").asString();
+    useCustomTimeFormat_ = !timeFormat_.empty();
+
     logFunctionMap_ = {{"$request_path", outputReqPath},
                        {"$path", outputReqPath},
                        {"$date",
@@ -51,6 +57,9 @@ void AccessLogger::initAndStart(const Json::Value &config)
                        {"$request_url", outputReqURL},
                        {"$query", outputReqQuery},
                        {"$url", outputReqURL},
+                       {"$request_version", outputVersion},
+                       {"$version", outputVersion},
+                       {"$request", outputReqLine},
                        {"$remote_addr", outputRemoteAddr},
                        {"$local_addr", outputLocalAddr},
                        {"$request_len", outputReqLength},
@@ -96,7 +105,15 @@ void AccessLogger::initAndStart(const Json::Value &config)
             },
             [&]() { asyncFileLogger_.flush(); },
             logIndex_);
-        auto sizeLimit = config.get("size_limit", 0).asUInt64();
+        auto sizeLimit = config.get("log_size_limit", 0).asUInt64();
+        if (sizeLimit == 0)
+        {
+            // In earlier code, "size_limit" is taken instead of
+            // "log_size_limit" as it said in the comment in AccessLogger.h.
+            // In order to ensure backward compatibility we still take this
+            // field as a fallback.
+            sizeLimit = config.get("size_limit", 0).asUInt64();
+        }
         if (sizeLimit > 0)
         {
             asyncFileLogger_.setFileSizeLimit(sizeLimit);
@@ -240,13 +257,30 @@ void AccessLogger::outputDate(trantor::LogStream &stream,
                               const drogon::HttpRequestPtr &,
                               const drogon::HttpResponsePtr &) const
 {
-    if (useLocalTime_)
+    if (useCustomTimeFormat_)
     {
-        stream << trantor::Date::now().toFormattedStringLocal(true);
+        if (useLocalTime_)
+        {
+            stream << trantor::Date::now().toCustomedFormattedStringLocal(
+                timeFormat_, showMicroseconds_);
+        }
+        else
+        {
+            stream << trantor::Date::now().toCustomedFormattedString(
+                timeFormat_, showMicroseconds_);
+        }
     }
     else
     {
-        stream << trantor::Date::now().toFormattedString(true);
+        if (useLocalTime_)
+        {
+            stream << trantor::Date::now().toFormattedStringLocal(
+                showMicroseconds_);
+        }
+        else
+        {
+            stream << trantor::Date::now().toFormattedString(showMicroseconds_);
+        }
     }
 }
 
@@ -254,13 +288,30 @@ void AccessLogger::outputReqDate(trantor::LogStream &stream,
                                  const drogon::HttpRequestPtr &req,
                                  const drogon::HttpResponsePtr &) const
 {
-    if (useLocalTime_)
+    if (useCustomTimeFormat_)
     {
-        stream << req->creationDate().toFormattedStringLocal(true);
+        if (useLocalTime_)
+        {
+            stream << req->creationDate().toCustomedFormattedStringLocal(
+                timeFormat_, showMicroseconds_);
+        }
+        else
+        {
+            stream << req->creationDate().toCustomedFormattedString(
+                timeFormat_, showMicroseconds_);
+        }
     }
     else
     {
-        stream << req->creationDate().toFormattedString(true);
+        if (useLocalTime_)
+        {
+            stream << req->creationDate().toFormattedStringLocal(
+                showMicroseconds_);
+        }
+        else
+        {
+            stream << req->creationDate().toFormattedString(showMicroseconds_);
+        }
     }
 }
 
@@ -284,6 +335,32 @@ void AccessLogger::outputReqURL(trantor::LogStream &stream,
     else
     {
         stream << req->path() << '?' << query;
+    }
+}
+
+//$request_version
+void AccessLogger::outputVersion(trantor::LogStream &stream,
+                                 const drogon::HttpRequestPtr &req,
+                                 const drogon::HttpResponsePtr &)
+{
+    stream << req->versionString();
+}
+
+//$request
+void AccessLogger::outputReqLine(trantor::LogStream &stream,
+                                 const drogon::HttpRequestPtr &req,
+                                 const drogon::HttpResponsePtr &)
+{
+    auto &query = req->query();
+    if (query.empty())
+    {
+        stream << req->methodString() << " " << req->path() << " "
+               << req->versionString();
+    }
+    else
+    {
+        stream << req->methodString() << " " << req->path() << '?' << query
+               << " " << req->versionString();
     }
 }
 
@@ -343,7 +420,7 @@ void AccessLogger::outputThreadNumber(trantor::LogStream &stream,
     {
         threadId_ = getthrid();
     }
-#elif defined _WIN32
+#elif defined _WIN32 || defined __HAIKU__
     if (threadId_ == 0)
     {
         std::stringstream ss;
@@ -416,21 +493,5 @@ void AccessLogger::outputRespContentType(trantor::LogStream &stream,
                                          const drogon::HttpRequestPtr &,
                                          const drogon::HttpResponsePtr &resp)
 {
-    auto typeStr = webContentTypeToString(resp->contentType());
-    if (typeStr.empty())
-    {
-        stream << "content-type: ";
-    }
-    else
-    {
-        if (typeStr.size() >= 2 && typeStr[typeStr.size() - 1] == '\n' &&
-            typeStr[typeStr.size() - 2] == '\r')
-        {
-            stream << string_view{typeStr.data(), typeStr.size() - 2};
-        }
-        else
-        {
-            stream << typeStr;
-        }
-    }
+    stream << resp->contentTypeString();
 }
